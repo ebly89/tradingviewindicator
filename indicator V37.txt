@@ -1081,11 +1081,8 @@ if size_az_hist > 0
 bool new_pivot_added = (array.size(ha_highBars) != last_ha_high_size) or (array.size(ha_lowBars) != last_ha_low_size)
 last_ha_high_size := array.size(ha_highBars)
 last_ha_low_size := array.size(ha_lowBars)
-// V38 FIX (5.2): trendline-recompute gate - find_best_trend/find_parallel_line are O(n^2); besides a new pivot, recompute only when the structural anchor moves (trend_start_bar changes on CHOCH/MS). All other triggers below keep their exact V37 semantics.
-var int last_tl_recalc_start = na
-bool tl_recalc_trigger = new_pivot_added or (trend_start_bar != last_tl_recalc_start)
-if tl_recalc_trigger
-    last_tl_recalc_start := trend_start_bar
+// V38 HOTFIX: REVERTED 5.2 gate. The 'trend_start_bar != last_tl_recalc_start' condition was TRUE on every live tick of every bar (trend_start_bar is na during flat/no-structure stretches, and na != anything is always true), so the gate never actually reduced recomputation - it only suppressed legitimate pivoted-only refreshes in edge cases while adding zero performance. Reverting to exact V37 trigger semantics.
+bool tl_recalc_trigger = new_pivot_added
 float prev_trend_extreme = trend_extreme
 if trend_dir == 1
     trend_extreme := na(trend_extreme) ? high : math.max(trend_extreme, high)
@@ -1191,7 +1188,8 @@ while i_active < size_active_zones
         bool is_brk = (z.is_res and close > z.top) or (not z.is_res and close < z.bottom)
         z.break_count := is_brk ? z.break_count + 1 : 0
         // V38 FIX (E2): flip required only ONE break on a freshly-promoted zone (break_count resets to 0 at promotion, so the very next closing breach flipped S<->R instantly). Now a flip requires a proven level: >=2 touches OR >=2 consecutive closes beyond the zone. Zones that still qualify flip on exactly this bar - identical timing for strong levels; weak single-touch levels keep their bounce role until confirmed.
-        if z.touches >= 2 or z.break_count >= 2
+        // V38 HOTFIX: gate applies ONLY when this bar is an actual break (is_brk). Without it, every untouched zone with touches>=2 was being FLIPPED IN PLACE on every single bar (flip branch kept is_flipped=false), destroying levels and causing the mass S/R disappearance reported after Commit E.
+        if is_brk and (z.touches >= 2 or z.break_count >= 2)
             z.is_res := not z.is_res
             z.is_flipped := true
             z.touches := 1
@@ -1667,7 +1665,7 @@ if show_ms_trend
             label.delete(choch_label)
             choch_line := line.new(ms_new_start_bar, ms_new_start_price, bar_index, ms_new_start_price, color = color_choch, width = 2, style = line.style_dashed)
             choch_label := label.new(bar_index, ms_new_start_price, text = 'CHOCH', color = color.new(color_choch, 60), textcolor = color.white, style = label.style_label_center, size = size.small)
-    if tl_recalc_trigger // V38 FIX (5.2): was 'new_pivot_added' - now also recomputes when trend_start_bar changes; identical pivot behavior plus one extra recompute per CHOCH/MS anchor shift
+    if tl_recalc_trigger // V38 HOTFIX: reverted to exact V37 trigger (new_pivot_added only) - see gate definition above
         line new_bear = find_best_trend(ha_highBars, ha_highPrices, true, atr_val, trend_start_bar, min_slope_atr, max_trendline_length)
         if not na(new_bear)
             line.delete(bear_line)
