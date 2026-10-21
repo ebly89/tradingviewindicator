@@ -2466,6 +2466,11 @@ if barstate.islast
     table.cell(stats_table, 1, 2, text = str.tostring(zones_failed), bgcolor = color.new(color_res_market, 80), text_color = color.white)
     table.cell(stats_table, 0, 3, text = 'Cancelled (Win)', bgcolor = color.new(color.gray, 80), text_color = color.white)
     table.cell(stats_table, 1, 3, text = str.tostring(total_cancelled), bgcolor = color.new(color.gray, 80), text_color = color.white)
+    // V38 FIX (2.1): report the two newly-activated zone counters in the stats table (table was pre-sized to 6 rows; only rows 4-5 are added here - zero cost on existing rows)
+    table.cell(stats_table, 0, 4, text = 'Zones Cancelled (Break)', bgcolor = color.new(color.gray, 80), text_color = color.white)
+    table.cell(stats_table, 1, 4, text = str.tostring(zones_cancelled_vol), bgcolor = color.new(color.gray, 80), text_color = color.white)
+    table.cell(stats_table, 0, 5, text = 'Zones Evicted (Overflow)', bgcolor = color.new(color.gray, 80), text_color = color.white)
+    table.cell(stats_table, 1, 5, text = str.tostring(zones_evicted_overflow), bgcolor = color.new(color.gray, 80), text_color = color.white)
 bool vp_needs_recalc = barstate.islast or (vwap_period_start_bar != last_vp_calc_start)
 if show_vp
     if vp_needs_recalc
