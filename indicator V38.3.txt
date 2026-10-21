@@ -1,5 +1,5 @@
 //@version=6
-indicator('Professional S/R & ATR Optimized Trendlines V38.2 + Commit E HOTFIX (Eviction/Flip/Cached-X fixes)', overlay = true, max_boxes_count = 500, max_lines_count = 100, max_labels_count = 500)
+indicator('Professional S/R & ATR Optimized Trendlines V38.3 + Realtime Setup Marking (V34 behavior restored)', overlay = true, max_boxes_count = 500, max_lines_count = 100, max_labels_count = 500)
 color_res_market = #c23131
 color_sup_market = #0a846d
 color_bear_trend = #c23131
@@ -53,7 +53,7 @@ rvol_min_threshold = input.float(0.8, 'סף נפח מינימלי לפריצה (
 breakout_window = input.int(3, 'חלון פריצה (נרות)', minval = 1, maxval = 10, group = 'RVOL Breakout Filter')
 show_rvol_label = input.bool(true, 'הצג לייבל RVOL', group = 'RVOL Breakout Filter')
 show_outlier_filter = input.bool(true, 'הפעל סינון נרות חריגים (Outlier Filter)', group = 'Outlier Candle Filter', tooltip = 'סונן נרות תבנית/פוזיציה בגודל לא פרופורציונלי ביחס לתנודתיות המגמה (מבוסס ATR ו-HA). מונע Engulfing מסיבי שיוצר פוזיציה לא ריאלית.')
-confirm_setup_entry = input.bool(false, 'צור Setup רק על נר סגור (Anti-Repaint)', group = 'Position Management', tooltip = 'V38.2: OFF (ברירת מחדל) = התנהגות V34 מקורית — Setup נוצר בזמן אמת כבר בתוך הנר החי. ON = Setup נוצר רק לאחר אישור הנר (barstate.isconfirmed) — מונע כניסות שנמחקות רטרו-אקטיבית ומייצב Alerts. עדכוני Setups פעילים קיימים (Trigger/Respect/Fail/Cancel) רצים Live בשני המצבים.')
+confirm_setup_entry = input.bool(false, 'צור Setup רק על נר סגור (Anti-Repaint)', group = 'Position Management', tooltip = 'V38.3: OFF (ברירת מחדל) = התנהגות V34 מקורית — Setup נוצר בזמן אמת כבר בתוך הנר החי. ON = Setup נוצר רק לאחר אישור הנר (barstate.isconfirmed) — מונע כניסות שנמחקות רטרו-אקטיבית ומייצב Alerts. עדכוני Setups פעילים קיימים (Trigger/Respect/Fail/Cancel) רצים Live בשני המצבים.')
 outlier_atr_mult    = input.float(2.5, 'תקרת גודל נר כמכפיל ATR', minval = 0.5, step = 0.1, group = 'Outlier Candle Filter', tooltip = 'אם טווח הנר (True Range) גדול פי X מ-ATR של מגמת ה-HA (מחושב על בסיס מחירי HA בלבד - ללא request.security), הנר נחשב חריג.')
 outlier_range_mult  = input.float(8.0, 'תקרת יחס מהלך הנר לתנודתיות המגמה', minval = 1.0, step = 0.5, group = 'Outlier Candle Filter', tooltip = 'אם מהלך הנר (High-Low) גדול פי X מסך התנודתיות שבנתה את המגמה (|HA Close - HA Start|), הנר נחשב חריג ביחס למגמה.')
 outlier_body_pct_min = input.float(55.0, 'אחוז גוף מינימלי באנגלפינג חריג (%)', minval = 0.0, maxval = 100.0, step = 5.0, group = 'Outlier Candle Filter', tooltip = 'אנגלפינג שבו הגוף תופס פחות מהאחוז הזה מטווח הנר (זנבות קיצוניים) - נפסל גם הוא.')
