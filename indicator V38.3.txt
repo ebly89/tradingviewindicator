@@ -1,5 +1,5 @@
 //@version=6
-indicator('Professional S/R & ATR Optimized Trendlines V37 + S/R Merge Fix (CE10271 patch)', overlay = true, max_boxes_count = 500, max_lines_count = 100, max_labels_count = 500)
+indicator('Professional S/R & ATR Optimized Trendlines V38.3 + Realtime Setup Marking (V34 behavior restored)', overlay = true, max_boxes_count = 500, max_lines_count = 100, max_labels_count = 500)
 color_res_market = #c23131
 color_sup_market = #0a846d
 color_bear_trend = #c23131
@@ -53,6 +53,7 @@ rvol_min_threshold = input.float(0.8, 'סף נפח מינימלי לפריצה (
 breakout_window = input.int(3, 'חלון פריצה (נרות)', minval = 1, maxval = 10, group = 'RVOL Breakout Filter')
 show_rvol_label = input.bool(true, 'הצג לייבל RVOL', group = 'RVOL Breakout Filter')
 show_outlier_filter = input.bool(true, 'הפעל סינון נרות חריגים (Outlier Filter)', group = 'Outlier Candle Filter', tooltip = 'סונן נרות תבנית/פוזיציה בגודל לא פרופורציונלי ביחס לתנודתיות המגמה (מבוסס ATR ו-HA). מונע Engulfing מסיבי שיוצר פוזיציה לא ריאלית.')
+confirm_setup_entry = input.bool(false, 'צור Setup רק על נר סגור (Anti-Repaint)', group = 'Position Management', tooltip = 'V38.3: OFF (ברירת מחדל) = התנהגות V34 מקורית — Setup נוצר בזמן אמת כבר בתוך הנר החי. ON = Setup נוצר רק לאחר אישור הנר (barstate.isconfirmed) — מונע כניסות שנמחקות רטרו-אקטיבית ומייצב Alerts. עדכוני Setups פעילים קיימים (Trigger/Respect/Fail/Cancel) רצים Live בשני המצבים.')
 outlier_atr_mult    = input.float(2.5, 'תקרת גודל נר כמכפיל ATR', minval = 0.5, step = 0.1, group = 'Outlier Candle Filter', tooltip = 'אם טווח הנר (True Range) גדול פי X מ-ATR של מגמת ה-HA (מחושב על בסיס מחירי HA בלבד - ללא request.security), הנר נחשב חריג.')
 outlier_range_mult  = input.float(8.0, 'תקרת יחס מהלך הנר לתנודתיות המגמה', minval = 1.0, step = 0.5, group = 'Outlier Candle Filter', tooltip = 'אם מהלך הנר (High-Low) גדול פי X מסך התנודתיות שבנתה את המגמה (|HA Close - HA Start|), הנר נחשב חריג ביחס למגמה.')
 outlier_body_pct_min = input.float(55.0, 'אחוז גוף מינימלי באנגלפינג חריג (%)', minval = 0.0, maxval = 100.0, step = 5.0, group = 'Outlier Candle Filter', tooltip = 'אנגלפינג שבו הגוף תופס פחות מהאחוז הזה מטווח הנר (זנבות קיצוניים) - נפסל גם הוא.')
@@ -96,7 +97,8 @@ float vwap_lower1 = vwap_value - vwap_std_raw
 float vwap_upper2 = vwap_value + 2 * vwap_std_raw
 float vwap_lower2 = vwap_value - 2 * vwap_std_raw
 ha_trueTicker = ticker.new(syminfo.prefix, syminfo.ticker)
-[ha_trueOpen, ha_trueHigh, ha_trueLow, ha_trueClose] = request.security(ha_trueTicker, timeframe.period, [open, high, low, close])
+// V38 FIX (3.3): explicit lookahead_off declaration - same behavior as default, removes ambiguity for alerts/backtest stability
+[ha_trueOpen, ha_trueHigh, ha_trueLow, ha_trueClose] = request.security(ha_trueTicker, timeframe.period, [open, high, low, close], lookahead = barmerge.lookahead_off)
 ha_atrSeries = ta.atr(ha_internalAtrLength)
 type DivergenceLabel
     label lbl
@@ -172,10 +174,18 @@ color color_ha_colorHigh = color.new(#c23131, 30)
 color color_ha_colorLow  = color.new(#0a846d, 30)
 var float last_confirmed_ph_price = na
 var float last_confirmed_ph_rsi = na
+// V38 FIX (E3): cached creation-bar index for Pre-Div labels - replaces runtime label.get_x() calls in the confluence block; reset at every deletion point alongside the cached Y
+var int pre_div_bear_x = na
 var label pre_div_bear_label = na
+// V38 FIX (1.1): cached Y for bear Pre-Div label - replaces runtime label.get_y() calls that throw on na/deleted labels
+var float pre_div_bear_y = na
 var float last_confirmed_pl_price = na
 var float last_confirmed_pl_rsi = na
+// V38 FIX (E3): cached creation-bar index for bull Pre-Div label (see bear-side note above)
+var int pre_div_bull_x = na
 var label pre_div_bull_label = na
+// V38 FIX (1.1): cached Y for bull Pre-Div label - replaces runtime label.get_y() calls that throw on na/deleted labels
+var float pre_div_bull_y = na
 var array<DivergenceLabel> div_labels = array.new<DivergenceLabel>()
 var array<SweepLabel> sweep_labels = array.new<SweepLabel>()
 var array<FVGBox> fvg_boxes = array.new<FVGBox>(0)
@@ -194,9 +204,12 @@ var int last_ha_high_size = 0
 var int last_ha_low_size = 0
 var int zones_respected = 0
 var int zones_failed = 0
+// V38 FIX (2.1): split cancellation reporting by reason - vol/level breaks vs max_active_zones overflow eviction
 var int zones_cancelled_vol = 0
 var int zones_cancelled_window = 0
-var table stats_table = table.new(position.bottom_right, 2, 4, border_color = color.white, border_width = 1)
+// V38 FIX (E1): evictions are now counted per-zone inside the overflow loop (was: a single +1 per bar regardless of how many zones were actually removed)
+var int zones_evicted_overflow = 0
+var table stats_table = table.new(position.bottom_right, 2, 6, border_color = color.white, border_width = 1)
 var int ai_status = 0
 var float impulse_vol = 0.0
 var float impulse_bars = 0.0
@@ -224,6 +237,8 @@ type Zone
     bool is_active
     bool is_flipped
     int break_count
+    // V38 FIX (4.1): cumulative break counter - never reset to 0; silent-memory expiry now counts TOTAL breaks (was: consecutive-only, so a zone breaking every other bar could never expire)
+    int total_breaks
 var array<Zone> silent_memory = array.new<Zone>(0)
 var array<Zone> active_zones  = array.new<Zone>(0)
 var line bull_line = na
@@ -264,7 +279,7 @@ var float cum_buy_vol = 0.0
 var float cum_sell_vol = 0.0
 var table vol_table = table.new(position.top_right, 2, 2, border_color = color.white, border_width = 1)
 var array<box> vp_boxes = array.new_box(0)
-var array<label> vp_labels = array.new_label(0)
+// V38 FIX (2.2): removed dead array 'vp_labels' - never populated anywhere in the script; its delete/update loops were pure overhead
 var array<box> hva_display_boxes = array.new_box(0)
 var array<bool> hva_is_bullish = array.new_bool(0)
 var int last_vp_calc_start = na
@@ -309,8 +324,9 @@ find_best_trend(indices, values, is_resistance, current_atr, trend_start, min_sl
                 bool broken = false
                 int total_score = 0
                 int right_score = 0
+                // V38 FIX (3.2): scan confirmed bars only (to bar_index - 1). With 'by 2' the old form always sampled close[0] (live candle -> repaint on trendline-break detection) and skipped p1_idx itself. Offsetting the window start keeps parity so pivots are sampled.
                 int loop_start = math.max(p1_idx, bar_index - 300)
-                for j = loop_start to bar_index by 2
+                for j = loop_start to bar_index - 1 by 2
                     float line_val = p1_val + slope * (j - p1_idx)
                     if (is_resistance and close[bar_index - j] > line_val + tolerance) or (not is_resistance and close[bar_index - j] < line_val - tolerance)
                         broken := true
@@ -362,8 +378,9 @@ find_parallel_line(indices_opp, values_opp, slope, current_atr, is_main_support,
                     if valid_position
                         bool broken = false
                         int score = 0
+                        // V38 FIX (3.2): confirmed bars only in parallel-line break scan (same parity logic as find_best_trend)
                         int loop_start = math.max(opp1_idx, bar_index - 300)
-                        for j = loop_start to bar_index by 2
+                        for j = loop_start to bar_index - 1 by 2
                             float line_val = opp1_val + slope * (j - opp1_idx)
                             if is_main_support
                                 if close[bar_index - j] > line_val + tolerance
@@ -758,6 +775,10 @@ if size_pending_high > 0
         if not na(pre_div_bear_label)
             label.delete(pre_div_bear_label)
         pre_div_bear_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bear_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bear_x := na
         int idx_in_main = -1
         int size_main_high = array.size(ha_highBars)
         if size_main_high > 0
@@ -827,7 +848,7 @@ if size_pending_high > 0
                         break
         if not handled
             box new_box = box.new(bIndex, potential_top, bar_index + 20, potential_bottom, xloc = xloc.bar_index, border_color = color.new(color.white, 100), bgcolor = color.new(color.white, 100))
-            Zone new_zone = Zone.new(new_box, potential_top, potential_bottom, bIndex, bar_index, 1, is_res_type, false, false, 0)
+            Zone new_zone = Zone.new(new_box, potential_top, potential_bottom, bIndex, bar_index, 1, is_res_type, false, false, 0, 0)
             int res_cnt = 0
             for sz in silent_memory
                 if sz.is_res
@@ -852,6 +873,10 @@ if size_pending_low > 0
         if not na(pre_div_bull_label)
             label.delete(pre_div_bull_label)
         pre_div_bull_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bull_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bull_x := na
         int idx_in_main = -1
         int size_main_low = array.size(ha_lowBars)
         if size_main_low > 0
@@ -921,7 +946,7 @@ if size_pending_low > 0
                         break
         if not handled
             box new_box = box.new(bIndex, potential_top, bar_index + 20, potential_bottom, xloc = xloc.bar_index, border_color = color.new(color.white, 100), bgcolor = color.new(color.white, 100))
-            Zone new_zone = Zone.new(new_box, potential_top, potential_bottom, bIndex, bar_index, 1, is_res_type, false, false, 0)
+            Zone new_zone = Zone.new(new_box, potential_top, potential_bottom, bIndex, bar_index, 1, is_res_type, false, false, 0, 0)
             int sup_cnt = 0
             for sz in silent_memory
                 if not sz.is_res
@@ -978,6 +1003,17 @@ while i_sweep < array.size(sweep_labels)
     else
         i_sweep := i_sweep + 1
 float touch_tol = atr_val * 0.5
+// V38 FIX (5.1): per-bar cache for sweep-history averages - prevents repeated array.avg() over the same small history (was recomputed once in the history-capture block and again up to N times inside the sweep scan). Values are identical; histories only change on this bar's touches, which are evaluated after these caches are filled.
+float eh_v_avg_c = array.size(extreme_high_vol_hist) > 0 ? array.avg(extreme_high_vol_hist) : na
+float eh_l_avg_c = array.size(extreme_high_ltf_hist) > 0 ? array.avg(extreme_high_ltf_hist) : na
+float el_v_avg_c = array.size(extreme_low_vol_hist) > 0 ? array.avg(extreme_low_vol_hist) : na
+float el_l_avg_c = array.size(extreme_low_ltf_hist) > 0 ? array.avg(extreme_low_ltf_hist) : na
+float ch_v_avg_c = array.size(choch_high_vol_hist) > 0 ? array.avg(choch_high_vol_hist) : na
+float ch_l_avg_c = array.size(choch_high_ltf_hist) > 0 ? array.avg(choch_high_ltf_hist) : na
+float cl_v_avg_c = array.size(choch_low_vol_hist) > 0 ? array.avg(choch_low_vol_hist) : na
+float cl_l_avg_c = array.size(choch_low_ltf_hist) > 0 ? array.avg(choch_low_ltf_hist) : na
+float sr_v_avg_c = array.size(sr_vol_hist) > 0 ? array.avg(sr_vol_hist) : na
+float sr_l_avg_c = array.size(sr_ltf_hist) > 0 ? array.avg(sr_ltf_hist) : na
 if not na(trend_absolute_extreme) and trend_dir == 1
     if high >= trend_absolute_extreme - touch_tol
         array.push(extreme_high_vol_hist, volume)
@@ -985,6 +1021,9 @@ if not na(trend_absolute_extreme) and trend_dir == 1
         if array.size(extreme_high_vol_hist) > max_history_per_level
             array.shift(extreme_high_vol_hist)
             array.shift(extreme_high_ltf_hist)
+        // V38 FIX (5.1): refresh cache after push/shift so the sweep scan below sees exactly the same value it would have recomputed
+        eh_v_avg_c := array.avg(extreme_high_vol_hist)
+        eh_l_avg_c := array.avg(extreme_high_ltf_hist)
 if not na(trend_absolute_extreme) and trend_dir == -1
     if low <= trend_absolute_extreme + touch_tol
         array.push(extreme_low_vol_hist, volume)
@@ -992,6 +1031,9 @@ if not na(trend_absolute_extreme) and trend_dir == -1
         if array.size(extreme_low_vol_hist) > max_history_per_level
             array.shift(extreme_low_vol_hist)
             array.shift(extreme_low_ltf_hist)
+        // V38 FIX (5.1): refresh cache after push/shift
+        el_v_avg_c := array.avg(extreme_low_vol_hist)
+        el_l_avg_c := array.avg(extreme_low_ltf_hist)
 if not na(choch_pivot_val) and trend_dir == 1
     if high >= choch_pivot_val - touch_tol
         array.push(choch_high_vol_hist, volume)
@@ -999,6 +1041,9 @@ if not na(choch_pivot_val) and trend_dir == 1
         if array.size(choch_high_vol_hist) > max_history_per_level
             array.shift(choch_high_vol_hist)
             array.shift(choch_high_ltf_hist)
+        // V38 FIX (5.1): refresh cache after push/shift
+        ch_v_avg_c := array.avg(choch_high_vol_hist)
+        ch_l_avg_c := array.avg(choch_high_ltf_hist)
 if not na(choch_pivot_val) and trend_dir == -1
     if low <= choch_pivot_val + touch_tol
         array.push(choch_low_vol_hist, volume)
@@ -1006,6 +1051,9 @@ if not na(choch_pivot_val) and trend_dir == -1
         if array.size(choch_low_vol_hist) > max_history_per_level
             array.shift(choch_low_vol_hist)
             array.shift(choch_low_ltf_hist)
+        // V38 FIX (5.1): refresh cache after push/shift
+        cl_v_avg_c := array.avg(choch_low_vol_hist)
+        cl_l_avg_c := array.avg(choch_low_ltf_hist)
 int size_az_hist = array.size(active_zones)
 if size_az_hist > 0
     for i = 0 to size_az_hist - 1 by 1
@@ -1016,6 +1064,9 @@ if size_az_hist > 0
             if array.size(sr_vol_hist) > max_history_per_level
                 array.shift(sr_vol_hist)
                 array.shift(sr_ltf_hist)
+            // V38 FIX (5.1): refresh cache after push/shift
+            sr_v_avg_c := array.avg(sr_vol_hist)
+            sr_l_avg_c := array.avg(sr_ltf_hist)
             break
         if not z.is_res and low <= z.bottom + touch_tol
             array.push(sr_vol_hist, volume)
@@ -1023,21 +1074,28 @@ if size_az_hist > 0
             if array.size(sr_vol_hist) > max_history_per_level
                 array.shift(sr_vol_hist)
                 array.shift(sr_ltf_hist)
+            // V38 FIX (5.1): refresh cache after push/shift
+            sr_v_avg_c := array.avg(sr_vol_hist)
+            sr_l_avg_c := array.avg(sr_ltf_hist)
             break
 bool new_pivot_added = (array.size(ha_highBars) != last_ha_high_size) or (array.size(ha_lowBars) != last_ha_low_size)
 last_ha_high_size := array.size(ha_highBars)
 last_ha_low_size := array.size(ha_lowBars)
+// V38 HOTFIX: REVERTED 5.2 gate. The 'trend_start_bar != last_tl_recalc_start' condition was TRUE on every live tick of every bar (trend_start_bar is na during flat/no-structure stretches, and na != anything is always true), so the gate never actually reduced recomputation - it only suppressed legitimate pivoted-only refreshes in edge cases while adding zero performance. Reverting to exact V37 trigger semantics.
+bool tl_recalc_trigger = new_pivot_added
 float prev_trend_extreme = trend_extreme
 if trend_dir == 1
     trend_extreme := na(trend_extreme) ? high : math.max(trend_extreme, high)
     if not na(trend_extreme) and (na(prev_trend_extreme) or trend_extreme > prev_trend_extreme)
         impulse_vol := cum_buy_vol + cum_sell_vol
-        impulse_bars := math.max(1, bar_index - (na(trend_start_bar) ? bar_index : trend_start_bar))
+        // V38 FIX (4.4): when trend_start_bar is na the old expression always collapsed to 1 bar, inflating avg_impulse_vol and distorting pullback scoring; fall back to the last pivot bar (structure start proxy), else keep 1
+        impulse_bars := math.max(1, bar_index - (na(trend_start_bar) ? (array.size(ha_lowBars) > 0 ? int(array.get(ha_lowBars, array.size(ha_lowBars) - 1)) : bar_index) : trend_start_bar))
 else if trend_dir == -1
     trend_extreme := na(trend_extreme) ? low : math.min(trend_extreme, low)
     if not na(trend_extreme) and (na(prev_trend_extreme) or trend_extreme < prev_trend_extreme)
         impulse_vol := cum_buy_vol + cum_sell_vol
-        impulse_bars := math.max(1, bar_index - (na(trend_start_bar) ? bar_index : trend_start_bar))
+        // V38 FIX (4.4): bear side - same fallback via last swing-low pivot bar
+        impulse_bars := math.max(1, bar_index - (na(trend_start_bar) ? (array.size(ha_highBars) > 0 ? int(array.get(ha_highBars, array.size(ha_highBars) - 1)) : bar_index) : trend_start_bar))
 if not na(choch_pivot_idx) and bar_index > choch_pivot_idx
     lowest_since_choch := na(lowest_since_choch) ? low : math.min(lowest_since_choch, low)
     highest_since_choch := na(highest_since_choch) ? high : math.max(highest_since_choch, high)
@@ -1046,32 +1104,58 @@ if trend_dir == 1 and not na(last_confirmed_ph_price)
         if rsi_val < last_confirmed_ph_rsi
             if na(pre_div_bear_label)
                 pre_div_bear_label := label.new(bar_index, high, text = 'Pre-Div', color = color_bear_trend, textcolor = color.white, style = label.style_label_down, size = size.small)
+                // V38 FIX (1.1): cache Y at creation; replaces fragile label.get_y() runtime read
+                pre_div_bear_y := high
+                // V38 FIX (E3): cache creation bar alongside Y
+                pre_div_bear_x := bar_index
         else
-            if high > label.get_y(pre_div_bear_label)
+            // V38 FIX (1.1): double guard - label existence + cached-Y validity (was: raw label.get_y which throws on na/deleted label)
+            if not na(pre_div_bear_label) and not na(pre_div_bear_y) and high > pre_div_bear_y
                 label.set_xy(pre_div_bear_label, bar_index, high)
+                pre_div_bear_y := high
+                // V38 FIX (E3): keep cached X in sync with the moved label
+                pre_div_bear_x := bar_index
     else
         if not na(pre_div_bear_label)
             label.delete(pre_div_bear_label)
         pre_div_bear_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bear_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bear_x := na
 if trend_dir == -1 and not na(last_confirmed_pl_price)
     if low < last_confirmed_pl_price
         if rsi_val > last_confirmed_pl_rsi
             if na(pre_div_bull_label)
                 pre_div_bull_label := label.new(bar_index, low, text = 'Pre-Div', color = color_bull_trend, textcolor = color.white, style = label.style_label_up, size = size.small)
+                // V38 FIX (1.1): cache Y at creation; replaces fragile label.get_y() runtime read
+                pre_div_bull_y := low
+                // V38 FIX (E3): cache creation bar alongside Y
+                pre_div_bull_x := bar_index
         else
-            if low < label.get_y(pre_div_bull_label)
+            // V38 FIX (1.1): double guard - label existence + cached-Y validity (was: raw label.get_y which throws on na/deleted label)
+            if not na(pre_div_bull_label) and not na(pre_div_bull_y) and low < pre_div_bull_y
                 label.set_xy(pre_div_bull_label, bar_index, low)
+                pre_div_bull_y := low
+                // V38 FIX (E3): keep cached X in sync with the moved label
+                pre_div_bull_x := bar_index
     else
         if not na(pre_div_bull_label)
             label.delete(pre_div_bull_label)
         pre_div_bull_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bull_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bull_x := na
 int i_silent = 0
 int size_silent_mem = array.size(silent_memory)
 while i_silent < size_silent_mem
     Zone z = array.get(silent_memory, i_silent)
     bool is_broken = (z.is_res and close > z.top) or (not z.is_res and close < z.bottom)
-    z.break_count := is_broken ? z.break_count + 1 : 0
-    if z.break_count >= 2 or bar_index - z.start_bar > max_silent_age
+    // V38 FIX (4.1): cumulative expiry - total_breaks never resets; break_count keeps its consecutive semantics for flip logic elsewhere
+    if is_broken
+        z.total_breaks := z.total_breaks + 1
+    if z.total_breaks >= 2 or bar_index - z.start_bar > max_silent_age
         box.delete(z.bx)
         array.remove(silent_memory, i_silent)
         size_silent_mem := size_silent_mem - 1
@@ -1089,6 +1173,8 @@ while i_silent < size_silent_mem
             box.set_border_color(z.bx, color.new(base_color_a, 40))
             box.set_border_width(z.bx, math.min(z.touches, 4))
             box.set_right(z.bx, bar_index + 20)
+        // V38 FIX (4.1): reset consecutive counter on promotion to active; flip logic below starts fresh
+        z.break_count := 0
         array.push(active_zones, z)
         array.remove(silent_memory, i_silent)
         size_silent_mem := size_silent_mem - 1
@@ -1101,7 +1187,9 @@ while i_active < size_active_zones
     if not z.is_flipped
         bool is_brk = (z.is_res and close > z.top) or (not z.is_res and close < z.bottom)
         z.break_count := is_brk ? z.break_count + 1 : 0
-        if z.break_count >= 1
+        // V38 FIX (E2): flip required only ONE break on a freshly-promoted zone (break_count resets to 0 at promotion, so the very next closing breach flipped S<->R instantly). Now a flip requires a proven level: >=2 touches OR >=2 consecutive closes beyond the zone. Zones that still qualify flip on exactly this bar - identical timing for strong levels; weak single-touch levels keep their bounce role until confirmed.
+        // V38 HOTFIX: gate applies ONLY when this bar is an actual break (is_brk). Without it, every untouched zone with touches>=2 was being FLIPPED IN PLACE on every single bar (flip branch kept is_flipped=false), destroying levels and causing the mass S/R disappearance reported after Commit E.
+        if is_brk and (z.touches >= 2 or z.break_count >= 2)
             z.is_res := not z.is_res
             z.is_flipped := true
             z.touches := 1
@@ -1121,6 +1209,8 @@ while i_active < size_active_zones
         i_active := i_active + 1
     else
         if (z.is_res and close > z.top) or (not z.is_res and close < z.bottom)
+            // V38 FIX (2.1): activate the dead zones_cancelled_vol counter - flipped zone broken post-flip = cancelled by price action (vol/level break), was never incremented anywhere in V37
+            zones_cancelled_vol := zones_cancelled_vol + 1
             box.delete(z.bx)
             array.remove(active_zones, i_active)
             size_active_zones := size_active_zones - 1
@@ -1148,7 +1238,10 @@ while i_active < size_active_zones
                 box.set_border_width(z.bx, math.min(z.touches, 4))
                 box.set_right(z.bx, bar_index + 20)
         i_active := i_active + 1
-if array.size(active_zones) > max_active_zones
+// V38 FIX (E1): was an 'if' that removed only ONE zone per bar while adding up to several via pivot merges - active_zones could stay over max_active_zones indefinitely; now a while-loop evicts every excess zone, oldest-first (same order as before), counting each eviction
+while array.size(active_zones) > max_active_zones
+    // V38 FIX (2.1): overflow eviction counted separately from level-break cancellations
+    zones_evicted_overflow := zones_evicted_overflow + 1
     box.delete(array.remove(active_zones, 0).bx)
 int hh_bar = na
 float hh_price = na
@@ -1438,9 +1531,17 @@ if show_ms_trend
         if not na(pre_div_bear_label)
             label.delete(pre_div_bear_label)
         pre_div_bear_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bear_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bear_x := na
         if not na(pre_div_bull_label)
             label.delete(pre_div_bull_label)
         pre_div_bull_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bull_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bull_x := na
         last_confirmed_ph_price := na
         last_confirmed_pl_price := na
         if not na(last_bull_pattern_lbl)
@@ -1525,9 +1626,17 @@ if show_ms_trend
         if not na(pre_div_bear_label)
             label.delete(pre_div_bear_label)
         pre_div_bear_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bear_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bear_x := na
         if not na(pre_div_bull_label)
             label.delete(pre_div_bull_label)
         pre_div_bull_label := na
+        // V38 FIX (1.2): reset cached Y at every deletion point
+        pre_div_bull_y := na
+        // V38 FIX (E3): reset cached X at every deletion point
+        pre_div_bull_x := na
         last_confirmed_ph_price := na
         last_confirmed_pl_price := na
         if not na(last_bull_pattern_lbl)
@@ -1556,7 +1665,7 @@ if show_ms_trend
             label.delete(choch_label)
             choch_line := line.new(ms_new_start_bar, ms_new_start_price, bar_index, ms_new_start_price, color = color_choch, width = 2, style = line.style_dashed)
             choch_label := label.new(bar_index, ms_new_start_price, text = 'CHOCH', color = color.new(color_choch, 60), textcolor = color.white, style = label.style_label_center, size = size.small)
-    if new_pivot_added
+    if tl_recalc_trigger // V38 HOTFIX: reverted to exact V37 trigger (new_pivot_added only) - see gate definition above
         line new_bear = find_best_trend(ha_highBars, ha_highPrices, true, atr_val, trend_start_bar, min_slope_atr, max_trendline_length)
         if not na(new_bear)
             line.delete(bear_line)
@@ -1861,7 +1970,8 @@ if is_bull_pattern and valid_bull_context
         confluence_count := confluence_count + 1
     if confluence_ema_long
         confluence_count := confluence_count + 1
-    if not na(pre_div_bull_label) and (bar_index - label.get_x(pre_div_bull_label) <= 2)
+    // V38 FIX (E3): cached-X check replaces label.get_x() runtime read (identical semantics: label existence implies valid cached X)
+    if not na(pre_div_bull_x) and (bar_index - pre_div_bull_x <= 2)
         confluence_count := confluence_count + 1
     if not na(trend_extreme) and trend_dir == -1 and low <= trend_extreme
         confluence_count := confluence_count + 1
@@ -1878,7 +1988,8 @@ if is_bear_pattern and valid_bear_context
         confluence_count := confluence_count + 1
     if confluence_ema_short
         confluence_count := confluence_count + 1
-    if not na(pre_div_bear_label) and (bar_index - label.get_x(pre_div_bear_label) <= 2)
+    // V38 FIX (E3): cached-X check replaces label.get_x() runtime read (identical semantics)
+    if not na(pre_div_bear_x) and (bar_index - pre_div_bear_x <= 2)
         confluence_count := confluence_count + 1
     if not na(trend_extreme) and trend_dir == 1 and high >= trend_extreme
         confluence_count := confluence_count + 1
@@ -1917,8 +2028,9 @@ if show_sweeps and not na(trend_start_bar) and bar_index >= trend_start_bar
     if trend_dir == 1 and not na(trend_absolute_extreme)
         if high > trend_absolute_extreme and close <= trend_absolute_extreme
             if buy_pct_ltf >= ltf_absorption_threshold
-                sw_avg_vol := array.size(extreme_high_vol_hist) > 0 ? array.avg(extreme_high_vol_hist) : volume
-                sw_avg_ltf := array.size(extreme_high_ltf_hist) > 0 ? array.avg(extreme_high_ltf_hist) : buy_pct_ltf
+                // V38 FIX (5.1): use per-bar cached averages (identical values, no repeated array.avg)
+                sw_avg_vol := na(eh_v_avg_c) ? volume : eh_v_avg_c
+                sw_avg_ltf := na(eh_l_avg_c) ? buy_pct_ltf : eh_l_avg_c
                 sw_v_dev := sw_avg_vol > 0 ? ((volume - sw_avg_vol) / sw_avg_vol) * 100 : 0.0
                 sw_l_dev := sw_avg_ltf > 0 ? ((buy_pct_ltf - sw_avg_ltf) / sw_avg_ltf) * 100 : 0.0
                 if sw_v_dev > best_vol_dev or sw_l_dev > best_ltf_dev
@@ -1929,8 +2041,9 @@ if show_sweeps and not na(trend_start_bar) and bar_index >= trend_start_bar
     else if trend_dir == -1 and not na(trend_absolute_extreme)
         if low < trend_absolute_extreme and close >= trend_absolute_extreme
             if sell_pct_ltf >= ltf_absorption_threshold
-                sw_avg_vol := array.size(extreme_low_vol_hist) > 0 ? array.avg(extreme_low_vol_hist) : volume
-                sw_avg_ltf := array.size(extreme_low_ltf_hist) > 0 ? array.avg(extreme_low_ltf_hist) : sell_pct_ltf
+                // V38 FIX (5.1): cached averages
+                sw_avg_vol := na(el_v_avg_c) ? volume : el_v_avg_c
+                sw_avg_ltf := na(el_l_avg_c) ? sell_pct_ltf : el_l_avg_c
                 sw_v_dev := sw_avg_vol > 0 ? ((volume - sw_avg_vol) / sw_avg_vol) * 100 : 0.0
                 sw_l_dev := sw_avg_ltf > 0 ? ((sell_pct_ltf - sw_avg_ltf) / sw_avg_ltf) * 100 : 0.0
                 if sw_v_dev > best_vol_dev or sw_l_dev > best_ltf_dev
@@ -1941,8 +2054,9 @@ if show_sweeps and not na(trend_start_bar) and bar_index >= trend_start_bar
     if trend_dir == 1 and not na(choch_pivot_val)
         if high > choch_pivot_val and close <= choch_pivot_val
             if buy_pct_ltf >= ltf_absorption_threshold
-                sw_avg_vol := array.size(choch_high_vol_hist) > 0 ? array.avg(choch_high_vol_hist) : volume
-                sw_avg_ltf := array.size(choch_high_ltf_hist) > 0 ? array.avg(choch_high_ltf_hist) : buy_pct_ltf
+                // V38 FIX (5.1): cached averages
+                sw_avg_vol := na(ch_v_avg_c) ? volume : ch_v_avg_c
+                sw_avg_ltf := na(ch_l_avg_c) ? buy_pct_ltf : ch_l_avg_c
                 sw_v_dev := sw_avg_vol > 0 ? ((volume - sw_avg_vol) / sw_avg_vol) * 100 : 0.0
                 sw_l_dev := sw_avg_ltf > 0 ? ((buy_pct_ltf - sw_avg_ltf) / sw_avg_ltf) * 100 : 0.0
                 if sw_v_dev > best_vol_dev or sw_l_dev > best_ltf_dev
@@ -1953,8 +2067,9 @@ if show_sweeps and not na(trend_start_bar) and bar_index >= trend_start_bar
     else if trend_dir == -1 and not na(choch_pivot_val)
         if low < choch_pivot_val and close >= choch_pivot_val
             if sell_pct_ltf >= ltf_absorption_threshold
-                sw_avg_vol := array.size(choch_low_vol_hist) > 0 ? array.avg(choch_low_vol_hist) : volume
-                sw_avg_ltf := array.size(choch_low_ltf_hist) > 0 ? array.avg(choch_low_ltf_hist) : sell_pct_ltf
+                // V38 FIX (5.1): cached averages
+                sw_avg_vol := na(cl_v_avg_c) ? volume : cl_v_avg_c
+                sw_avg_ltf := na(cl_l_avg_c) ? sell_pct_ltf : cl_l_avg_c
                 sw_v_dev := sw_avg_vol > 0 ? ((volume - sw_avg_vol) / sw_avg_vol) * 100 : 0.0
                 sw_l_dev := sw_avg_ltf > 0 ? ((sell_pct_ltf - sw_avg_ltf) / sw_avg_ltf) * 100 : 0.0
                 if sw_v_dev > best_vol_dev or sw_l_dev > best_ltf_dev
@@ -1968,8 +2083,9 @@ if show_sweeps and not na(trend_start_bar) and bar_index >= trend_start_bar
             Zone z = array.get(active_zones, i)
             if z.is_res and high > z.top and close <= z.top
                 if buy_pct_ltf >= ltf_absorption_threshold
-                    sw_avg_vol := array.size(sr_vol_hist) > 0 ? array.avg(sr_vol_hist) : volume
-                    sw_avg_ltf := array.size(sr_ltf_hist) > 0 ? array.avg(sr_ltf_hist) : buy_pct_ltf
+                    // V38 FIX (5.1): cached averages
+                    sw_avg_vol := na(sr_v_avg_c) ? volume : sr_v_avg_c
+                    sw_avg_ltf := na(sr_l_avg_c) ? buy_pct_ltf : sr_l_avg_c
                     sw_v_dev := sw_avg_vol > 0 ? ((volume - sw_avg_vol) / sw_avg_vol) * 100 : 0.0
                     sw_l_dev := sw_avg_ltf > 0 ? ((buy_pct_ltf - sw_avg_ltf) / sw_avg_ltf) * 100 : 0.0
                     if sw_v_dev > best_vol_dev or sw_l_dev > best_ltf_dev
@@ -1979,8 +2095,9 @@ if show_sweeps and not na(trend_start_bar) and bar_index >= trend_start_bar
                         is_bull_sweep := false
             if not z.is_res and low < z.bottom and close >= z.bottom
                 if sell_pct_ltf >= ltf_absorption_threshold
-                    sw_avg_vol := array.size(sr_vol_hist) > 0 ? array.avg(sr_vol_hist) : volume
-                    sw_avg_ltf := array.size(sr_ltf_hist) > 0 ? array.avg(sr_ltf_hist) : sell_pct_ltf
+                    // V38 FIX (5.1): cached averages
+                    sw_avg_vol := na(sr_v_avg_c) ? volume : sr_v_avg_c
+                    sw_avg_ltf := na(sr_l_avg_c) ? sell_pct_ltf : sr_l_avg_c
                     sw_v_dev := sw_avg_vol > 0 ? ((volume - sw_avg_vol) / sw_avg_vol) * 100 : 0.0
                     sw_l_dev := sw_avg_ltf > 0 ? ((sell_pct_ltf - sw_avg_ltf) / sw_avg_ltf) * 100 : 0.0
                     if sw_v_dev > best_vol_dev or sw_l_dev > best_ltf_dev
@@ -1995,16 +2112,28 @@ if show_sweeps and not na(trend_start_bar) and bar_index >= trend_start_bar
             if not fvg_obj.is_broken
                 if not fvg_obj.is_bullish and high > fvg_obj.top and close <= fvg_obj.top
                     if buy_pct_ltf >= ltf_absorption_threshold
-                        is_bear_sweep := true
-                        is_bull_sweep := false
-                        best_vol_dev := 9999.0
-                        best_ltf_dev := 9999.0
+                        // V38 FIX (4.2): FVG sweeps now compute real vol/LTF deviation against the shared SR touch history (was hardcoded 9999.0, which fabricated the Sweep label percentages and always hijacked best-dev selection)
+                        float fvg_sw_avg_vol = na(sr_v_avg_c) ? volume : sr_v_avg_c
+                        float fvg_sw_avg_ltf = na(sr_l_avg_c) ? buy_pct_ltf : sr_l_avg_c
+                        float fvg_sw_v_dev = fvg_sw_avg_vol > 0 ? ((volume - fvg_sw_avg_vol) / fvg_sw_avg_vol) * 100 : 0.0
+                        float fvg_sw_l_dev = fvg_sw_avg_ltf > 0 ? ((buy_pct_ltf - fvg_sw_avg_ltf) / fvg_sw_avg_ltf) * 100 : 0.0
+                        if fvg_sw_v_dev > best_vol_dev or fvg_sw_l_dev > best_ltf_dev
+                            best_vol_dev := fvg_sw_v_dev
+                            best_ltf_dev := fvg_sw_l_dev
+                            is_bear_sweep := true
+                            is_bull_sweep := false
                 if fvg_obj.is_bullish and low < fvg_obj.bottom and close >= fvg_obj.bottom
                     if sell_pct_ltf >= ltf_absorption_threshold
-                        is_bull_sweep := true
-                        is_bear_sweep := false
-                        best_vol_dev := 9999.0
-                        best_ltf_dev := 9999.0
+                        // V38 FIX (4.2): real deviation for bullish FVG sweep (same as above, sell side)
+                        float fvg_sw_avg_vol_b = na(sr_v_avg_c) ? volume : sr_v_avg_c
+                        float fvg_sw_avg_ltf_b = na(sr_l_avg_c) ? sell_pct_ltf : sr_l_avg_c
+                        float fvg_sw_v_dev_b = fvg_sw_avg_vol_b > 0 ? ((volume - fvg_sw_avg_vol_b) / fvg_sw_avg_vol_b) * 100 : 0.0
+                        float fvg_sw_l_dev_b = fvg_sw_avg_ltf_b > 0 ? ((sell_pct_ltf - fvg_sw_avg_ltf_b) / fvg_sw_avg_ltf_b) * 100 : 0.0
+                        if fvg_sw_v_dev_b > best_vol_dev or fvg_sw_l_dev_b > best_ltf_dev
+                            best_vol_dev := fvg_sw_v_dev_b
+                            best_ltf_dev := fvg_sw_l_dev_b
+                            is_bull_sweep := true
+                            is_bear_sweep := false
     // סינון נרות חריגים: גם Sweep שנוצר על נר לא פרופורציונלי (למשל מניפולציה/ספייק) נפסל - ללא overhead נוסף
     if is_bear_sweep or is_bull_sweep
         if outlier_vs_atr or outlier_vs_trend
@@ -2069,6 +2198,7 @@ while i_setup_mgmt < array.size(active_setups)
             trigger_invalidated := true
         if trigger_invalidated
             s.status := 5
+            // V38 FIX (4.3): pending setups never reached Trigger -> counted as Cancelled (window bucket), never as Failed - keeps Respect Rate symmetric
             zones_cancelled_window := zones_cancelled_window + 1
             line.delete(s.entry_line)
             label.delete(s.setup_lbl)
@@ -2078,6 +2208,7 @@ while i_setup_mgmt < array.size(active_setups)
             continue
         if bars_since_trigger > breakout_window
             s.status := 5
+            // V38 FIX (4.3): pending setups never reached Trigger -> counted as Cancelled (window bucket), never as Failed - keeps Respect Rate symmetric
             zones_cancelled_window := zones_cancelled_window + 1
             line.delete(s.entry_line)
             label.delete(s.setup_lbl)
@@ -2117,8 +2248,10 @@ while i_setup_mgmt < array.size(active_setups)
         continue
     float risk = math.abs(s.entry_price - s.sl_price)
     float respected_target = s.is_long ? s.entry_price + risk : s.entry_price - risk
-    bool is_respected = s.is_long ? high >= respected_target : low <= respected_target
-    bool is_failed = s.is_long ? close < s.sl_price : close > s.sl_price
+    // V38 FIX (4.3): a setup created on this very bar must not resolve to Respected/Failed from the same candle's wick/close (entry_p was taken from that same candle); resolution starts only from the next bar
+    bool resolvable = bar_index > s.creation_bar
+    bool is_respected = resolvable and (s.is_long ? high >= respected_target : low <= respected_target)
+    bool is_failed = resolvable and (s.is_long ? close < s.sl_price : close > s.sl_price)
     if is_respected
         s.status := 1
         zones_respected := zones_respected + 1
@@ -2241,7 +2374,8 @@ if show_setups
             vwap_score := vwap_score + 5
         int total_score = base_score + context_score + location_score + pullback_score + trigger_score + ema_direction_penalty + vwap_score
         total_score := math.max(0, math.min(100, total_score))
-        if total_score >= min_score_threshold and valid_trigger_position
+        if total_score >= min_score_threshold and valid_trigger_position and (not confirm_setup_entry or barstate.isconfirmed)
+            // V38 FIX (3.1): with the anti-repaint toggle ON, a new Setup is created only on a confirmed candle (entry_p = high/low of the finalized bar), stabilizing Alerts. Existing setup updates (Trigger/Respect/Fail/Cancel) still run live as before.
             float entry_p = is_long ? high : low
             float sl_p = is_long ? low - (atr_val * 0.2) : high + (atr_val * 0.2)
             if is_long and not na(bull_pattern_low)
@@ -2320,6 +2454,7 @@ if barstate.islast
             box.set_right(fvg_obj.bx, bar_index + 20)
     int total_setups = zones_respected + zones_failed
     float respect_rate = total_setups > 0 ? (zones_respected / total_setups) * 100 : 0
+    // V38 FIX (4.3): Respect/Fail are now mutually exclusive and both require a triggered setup; Cancelled (pending exits) reported separately below
     int total_cancelled = zones_cancelled_vol + zones_cancelled_window
     table.cell(stats_table, 0, 0, text = 'Total Setups', bgcolor = color.new(color.white, 100), text_color = color.black)
     table.cell(stats_table, 1, 0, text = str.tostring(total_setups), bgcolor = color.new(color.white, 100), text_color = color.black)
@@ -2329,6 +2464,11 @@ if barstate.islast
     table.cell(stats_table, 1, 2, text = str.tostring(zones_failed), bgcolor = color.new(color_res_market, 80), text_color = color.white)
     table.cell(stats_table, 0, 3, text = 'Cancelled (Win)', bgcolor = color.new(color.gray, 80), text_color = color.white)
     table.cell(stats_table, 1, 3, text = str.tostring(total_cancelled), bgcolor = color.new(color.gray, 80), text_color = color.white)
+    // V38 FIX (2.1): report the two newly-activated zone counters in the stats table (table was pre-sized to 6 rows; only rows 4-5 are added here - zero cost on existing rows)
+    table.cell(stats_table, 0, 4, text = 'Zones Cancelled (Break)', bgcolor = color.new(color.gray, 80), text_color = color.white)
+    table.cell(stats_table, 1, 4, text = str.tostring(zones_cancelled_vol), bgcolor = color.new(color.gray, 80), text_color = color.white)
+    table.cell(stats_table, 0, 5, text = 'Zones Evicted (Overflow)', bgcolor = color.new(color.gray, 80), text_color = color.white)
+    table.cell(stats_table, 1, 5, text = str.tostring(zones_evicted_overflow), bgcolor = color.new(color.gray, 80), text_color = color.white)
 bool vp_needs_recalc = barstate.islast or (vwap_period_start_bar != last_vp_calc_start)
 if show_vp
     if vp_needs_recalc
@@ -2338,11 +2478,7 @@ if show_vp
                 box.delete(array.get(vp_boxes, i))
             array.clear(vp_boxes)
         array.clear(hva_is_bullish)
-        int size_vp_lbls_rc = array.size(vp_labels)
-        if size_vp_lbls_rc > 0
-            for i = 0 to size_vp_lbls_rc - 1 by 1
-                label.delete(array.get(vp_labels, i))
-            array.clear(vp_labels)
+        // V38 FIX (2.2): dead vp_labels delete-loop removed (array never populated)
         int size_hva_boxes_rc = array.size(hva_display_boxes)
         if size_hva_boxes_rc > 0
             for i = 0 to size_hva_boxes_rc - 1 by 1
@@ -2419,10 +2555,7 @@ if show_vp
         if size_vp_boxes_upd > 0
             for i = 0 to size_vp_boxes_upd - 1 by 1
                 box.set_right(array.get(vp_boxes, i), bar_index + 20)
-        int size_vp_lbls_upd = array.size(vp_labels)
-        if size_vp_lbls_upd > 0
-            for i = 0 to size_vp_lbls_upd - 1 by 1
-                label.set_x(array.get(vp_labels, i), bar_index + 20)
+        // V38 FIX (2.2): dead vp_labels update-loop removed (array never populated)
         int size_hva_boxes_upd = array.size(hva_display_boxes)
         if size_hva_boxes_upd > 0
             for i = 0 to size_hva_boxes_upd - 1 by 1
